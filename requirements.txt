@@ -1,0 +1,8 @@
+openai
+sqlalchemy
+pymysql
+python-dotenv
+pandas
+fastapi 
+uvicorn
+cryptography
