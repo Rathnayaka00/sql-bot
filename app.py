@@ -7,13 +7,10 @@ from sqlalchemy import create_engine, text
 from openai import OpenAI
 from dotenv import load_dotenv
 
-# --- Load environment variables ---
 load_dotenv()
 
-# --- Initialize FastAPI ---
-app = FastAPI(title="Retail Sales Chatbot API")
+app = FastAPI(title="Garage Service Chatbot API")
 
-# Allow frontend (React, Streamlit, etc.) to call this API
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,42 +19,78 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Initialize OpenAI client ---
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
-# --- Database setup ---
 db_user = os.getenv("MYSQL_USER")
 db_password = os.getenv("MYSQL_PASSWORD")
 db_host = os.getenv("MYSQL_HOST")
-db_name = os.getenv("MYSQL_DATABASE")
+db_port = int(os.getenv("MYSQL_PORT") or 3306)
+db_name = os.getenv("MYSQL_DATABASE") or "service_management_db"
 
-engine = create_engine(f"mysql+pymysql://{db_user}:{db_password}@{db_host}/{db_name}")
+engine = create_engine(
+    f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}",
+    pool_pre_ping=True
+)
 
-# --- Few-shot examples ---
 few_shot_examples = """
-Q: Show me the total sales for each product category.
-SQL: SELECT ProductCategory, SUM(TotalAmount) AS TotalSales FROM sales_tb GROUP BY ProductCategory;
+Q: List vehicles with their owner name and contact.
+SQL: SELECT v.vehicle_id, v.VIN, v.license_plate, v.model, v.make, v.year,
+            c.name AS customer_name, c.email, c.phone
+     FROM vehicle_service_db.Vehicle AS v
+     JOIN customer_service_db.Customer AS c ON v.customer_id = c.customer_id;
 
-Q: List all customers who spent more than 500.
-SQL: SELECT CustomerID, SUM(TotalAmount) AS TotalSpent FROM sales_tb GROUP BY CustomerID HAVING TotalSpent > 500;
+Q: Show upcoming appointments with customer and vehicle details.
+SQL: SELECT a.appointment_id, a.appointment_date, a.time_slot, a.service_type, a.status,
+            c.name AS customer_name, v.license_plate, v.model, v.make
+     FROM appointment_service_db.Appointment AS a
+     JOIN customer_service_db.Customer AS c ON a.customer_id = c.customer_id
+     JOIN vehicle_service_db.Vehicle AS v ON a.vehicle_id = v.vehicle_id
+     ORDER BY a.appointment_date ASC;
 
-Q: Show the top 5 product categories by total sales.
-SQL: SELECT ProductCategory, SUM(TotalAmount) AS TotalSales FROM sales_tb GROUP BY ProductCategory ORDER BY TotalSales DESC LIMIT 5;
+Q: List services with assigned employee and vehicle info.
+SQL: SELECT s.service_id, s.service_type, s.status, s.start_time, s.end_time,
+            e.name AS employee_name, v.license_plate, v.model
+     FROM service_management_db.Service AS s
+     JOIN employee_service_db.Employee AS e ON s.assigned_to = e.employee_id
+     JOIN vehicle_service_db.Vehicle AS v ON s.vehicle_id = v.vehicle_id;
 
-Q: Find the average age of customers by gender.
-SQL: SELECT Gender, AVG(Age) AS AverageAge FROM sales_tb GROUP BY Gender;
+Q: Show updates for service 1 ordered by time.
+SQL: SELECT u.update_id, u.progress_percentage, u.update_text, u.created_at
+     FROM service_management_db.Service_Update AS u
+     WHERE u.service_id = 1
+     ORDER BY u.created_at ASC;
+
+Q: Total time logged per employee.
+SQL: SELECT e.employee_id, e.name, SUM(t.duration_minutes) AS total_minutes
+     FROM employee_service_db.Employee AS e
+     JOIN employee_service_db.Time_Log AS t ON e.employee_id = t.employee_id
+     GROUP BY e.employee_id, e.name
+     ORDER BY total_minutes DESC;
 """
 
-
-# --- Helper Functions ---
 def generate_sql(question: str) -> str:
-    """Generate SQL query from natural language."""
     prompt = f"""
-You are an expert MySQL SQL generator. 
-Database: 'retail_sales_db' with table 'sales_tb' (TransactionID, Date, CustomerID, Gender, Age, ProductCategory, Quantity, PriceperUnit, TotalAmount).
+You are an expert MySQL SQL generator for a garage service microservices database.
 
-Given a question, write a valid MySQL query.
-Return only the SQL statement, no explanations or formatting.
+Databases and tables:
+- customer_service_db.Customer (customer_id, first_name, last_name, name, email, phone, password_hash, created_at)
+- employee_service_db.Employee (employee_id, first_name, last_name, name, email, password_hash, role, photo_url, status, hourly_rate, specialization, hire_date, created_at)
+- employee_service_db.Time_Log (log_id, employee_id, work_type, start_time, end_time, duration_minutes, description, created_at)
+- vehicle_service_db.Vehicle (vehicle_id, customer_id, VIN, license_plate, model, make, year, color, mileage, status, updated_at)
+- appointment_service_db.Appointment (appointment_id, customer_id, vehicle_id, appointment_date, time_slot, service_type, status, created_at, updated_at)
+- service_management_db.Service (service_id, vehicle_id, assigned_to, service_type, description, start_time, end_time, estimated_cost, actual_cost, completion_percentage, notes, status, created_at, updated_at)
+- service_management_db.Service_Update (update_id, service_id, progress_percentage, update_text, created_at)
+
+Relationships:
+- Vehicle.customer_id → Customer.customer_id
+- Appointment.customer_id → Customer.customer_id; Appointment.vehicle_id → Vehicle.vehicle_id
+- Service.vehicle_id → Vehicle.vehicle_id; Service.assigned_to → Employee.employee_id
+- Service_Update.service_id → Service.service_id
+
+Requirements:
+- ALWAYS fully-qualify tables with their database name (e.g., service_management_db.Service).
+- Generate ONE valid MySQL SELECT statement only. No comments, no markdown, no DDL/DML.
+- Prefer JOINs to combine related entities according to the relationships above.
+- Include ORDER BY when the question implies sorting (e.g., latest, top, upcoming).
 
 Examples:
 {few_shot_examples}
@@ -75,7 +108,6 @@ SQL:
 
 
 def execute_sql(query: str):
-    """Execute SQL query and return pandas DataFrame."""
     try:
         with engine.connect() as conn:
             result = conn.execute(text(query))
@@ -87,9 +119,8 @@ def execute_sql(query: str):
 
 
 def explain_results(question: str, df):
-    """Generate natural language summary of results."""
     if isinstance(df, str):
-        return f"⚠️ I couldn’t process your question because of an error: {df}"
+        return f"I couldn’t process your question because of an error: {df}"
 
     if df.empty:
         return "I couldn’t find any matching records for that question."
@@ -97,7 +128,7 @@ def explain_results(question: str, df):
     data_str = df.to_string(index=False)
 
     prompt = f"""
-You are a friendly retail sales assistant.
+You are a friendly garage service assistant.
 The user asked: "{question}"
 
 Here are the query results:
@@ -112,24 +143,17 @@ Write a short and natural explanation in plain language — no SQL, just summari
     )
     return response.choices[0].message.content.strip()
 
-
-# --- Request Body Schema ---
 class QuestionRequest(BaseModel):
     question: str
 
-
-# --- API Endpoint ---
 @app.post("/chat")
 async def chat(request: QuestionRequest):
-    """Main chatbot endpoint."""
     question = request.question
     sql_query = generate_sql(question)
     result_df = execute_sql(sql_query)
     reply = explain_results(question, result_df)
     return {"answer": reply}
 
-
-# --- Root route ---
 @app.get("/")
 async def root():
-    return {"message": "Retail Sales Chatbot API is running 🚀"}
+    return {"message": "Garage Service Chatbot API is running 🚀"}
