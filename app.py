@@ -20,77 +20,78 @@ app.add_middleware(
 )
 
 client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-db_user = os.getenv("MYSQL_USER")
-db_password = os.getenv("MYSQL_PASSWORD")
-db_host = os.getenv("MYSQL_HOST")
-db_port = int(os.getenv("MYSQL_PORT") or 3306)
-db_name = os.getenv("MYSQL_DATABASE") or "service_management_db"
+
+pg_user = os.getenv("POSTGRES_USER")
+pg_password = os.getenv("POSTGRES_PASSWORD")
+pg_host = os.getenv("POSTGRES_HOST")
+pg_port = int(os.getenv("POSTGRES_PORT") or 5432)
+pg_db = os.getenv("POSTGRES_DB")
 
 engine = create_engine(
-    f"mysql+pymysql://{db_user}:{db_password}@{db_host}:{db_port}/{db_name}",
+    f"postgresql+psycopg2://{pg_user}:{pg_password}@{pg_host}:{pg_port}/{pg_db}",
     pool_pre_ping=True
 )
 
 few_shot_examples = """
 Q: List vehicles with their owner name and contact.
-SQL: SELECT v.vehicle_id, v.VIN, v.license_plate, v.model, v.make, v.year,
+SQL: SELECT v.vehicle_id, v.vin, v.license_plate, v.model, v.make, v.year,
             c.name AS customer_name, c.email, c.phone
-     FROM vehicle_service_db.Vehicle AS v
-     JOIN customer_service_db.Customer AS c ON v.customer_id = c.customer_id;
+     FROM vehicle_service_db.vehicle AS v
+     JOIN customer_service_db.customer AS c ON v.customer_id = c.customer_id;
 
 Q: Show upcoming appointments with customer and vehicle details.
 SQL: SELECT a.appointment_id, a.appointment_date, a.time_slot, a.service_type, a.status,
             c.name AS customer_name, v.license_plate, v.model, v.make
-     FROM appointment_service_db.Appointment AS a
-     JOIN customer_service_db.Customer AS c ON a.customer_id = c.customer_id
-     JOIN vehicle_service_db.Vehicle AS v ON a.vehicle_id = v.vehicle_id
+     FROM appointment_service_db.appointment AS a
+     JOIN customer_service_db.customer AS c ON a.customer_id = c.customer_id
+     JOIN vehicle_service_db.vehicle AS v ON a.vehicle_id = v.vehicle_id
      ORDER BY a.appointment_date ASC;
 
 Q: List services with assigned employee and vehicle info.
 SQL: SELECT s.service_id, s.service_type, s.status, s.start_time, s.end_time,
             e.name AS employee_name, v.license_plate, v.model
-     FROM service_management_db.Service AS s
-     JOIN employee_service_db.Employee AS e ON s.assigned_to = e.employee_id
-     JOIN vehicle_service_db.Vehicle AS v ON s.vehicle_id = v.vehicle_id;
+     FROM service_management_db.service AS s
+     JOIN employee_service_db.employee AS e ON s.assigned_to = e.employee_id
+     JOIN vehicle_service_db.vehicle AS v ON s.vehicle_id = v.vehicle_id;
 
 Q: Show updates for service 1 ordered by time.
 SQL: SELECT u.update_id, u.progress_percentage, u.update_text, u.created_at
-     FROM service_management_db.Service_Update AS u
+     FROM service_management_db.service_update AS u
      WHERE u.service_id = 1
      ORDER BY u.created_at ASC;
 
 Q: Total time logged per employee.
 SQL: SELECT e.employee_id, e.name, SUM(t.duration_minutes) AS total_minutes
-     FROM employee_service_db.Employee AS e
-     JOIN employee_service_db.Time_Log AS t ON e.employee_id = t.employee_id
+     FROM employee_service_db.employee AS e
+     JOIN employee_service_db.time_log AS t ON e.employee_id = t.employee_id
      GROUP BY e.employee_id, e.name
      ORDER BY total_minutes DESC;
 """
 
 def generate_sql(question: str) -> str:
     prompt = f"""
-You are an expert MySQL SQL generator for a garage service microservices database.
+You are an expert PostgreSQL SQL generator for a garage service microservices database.
 
-Databases and tables:
-- customer_service_db.Customer (customer_id, first_name, last_name, name, email, phone, password_hash, created_at)
-- employee_service_db.Employee (employee_id, first_name, last_name, name, email, password_hash, role, photo_url, status, hourly_rate, specialization, hire_date, created_at)
-- employee_service_db.Time_Log (log_id, employee_id, work_type, start_time, end_time, duration_minutes, description, created_at)
-- vehicle_service_db.Vehicle (vehicle_id, customer_id, VIN, license_plate, model, make, year, color, mileage, status, updated_at)
-- appointment_service_db.Appointment (appointment_id, customer_id, vehicle_id, appointment_date, time_slot, service_type, status, created_at, updated_at)
-- service_management_db.Service (service_id, vehicle_id, assigned_to, service_type, description, start_time, end_time, estimated_cost, actual_cost, completion_percentage, notes, status, created_at, updated_at)
-- service_management_db.Service_Update (update_id, service_id, progress_percentage, update_text, created_at)
+Schemas/tables:
+- customer_service_db.customer (customer_id, first_name, last_name, name, email, phone, password_hash, created_at)
+- employee_service_db.employee (employee_id, first_name, last_name, name, email, password_hash, role, photo_url, status, hourly_rate, specialization, hire_date, created_at)
+- employee_service_db.time_log (log_id, employee_id, work_type, start_time, end_time, duration_minutes, description, created_at)
+- vehicle_service_db.vehicle (vehicle_id, customer_id, vin, license_plate, model, make, year, color, mileage, status, updated_at)
+- appointment_service_db.appointment (appointment_id, customer_id, vehicle_id, appointment_date, time_slot, service_type, status, created_at, updated_at)
+- service_management_db.service (service_id, vehicle_id, assigned_to, service_type, description, start_time, end_time, estimated_cost, actual_cost, completion_percentage, notes, status, created_at, updated_at)
+- service_management_db.service_update (update_id, service_id, progress_percentage, update_text, created_at)
 
 Relationships:
-- Vehicle.customer_id → Customer.customer_id
-- Appointment.customer_id → Customer.customer_id; Appointment.vehicle_id → Vehicle.vehicle_id
-- Service.vehicle_id → Vehicle.vehicle_id; Service.assigned_to → Employee.employee_id
-- Service_Update.service_id → Service.service_id
+- vehicle.customer_id → customer.customer_id
+- appointment.customer_id → customer.customer_id; appointment.vehicle_id → vehicle.vehicle_id
+- service.vehicle_id → vehicle.vehicle_id; service.assigned_to → employee.employee_id
+- service_update.service_id → service.service_id
 
-Requirements:
-- ALWAYS fully-qualify tables with their database name (e.g., service_management_db.Service).
-- Generate ONE valid MySQL SELECT statement only. No comments, no markdown, no DDL/DML.
-- Prefer JOINs to combine related entities according to the relationships above.
-- Include ORDER BY when the question implies sorting (e.g., latest, top, upcoming).
+ Requirements:
+ - ALWAYS fully-qualify tables with schema (e.g., service_management_db.service).
+ - Generate ONE valid SELECT statement only. No comments, no markdown, no DDL/DML.
+ - Prefer JOINs to combine related entities according to the relationships above.
+ - Include ORDER BY when the question implies sorting (e.g., latest, top, upcoming).
 
 Examples:
 {few_shot_examples}
